@@ -11,9 +11,18 @@
 #include "bofdefs.h"
 #include "base.c"
 #define SECURITY_WIN32
-#include <secext.h> 
+#include <secext.h>
 
 #define MAX_ATTRIBUTES 100
+#define MAX_STRING 8192
+
+// Forward declare COM interfaces
+typedef struct IStream IStream;
+typedef IStream *LPSTREAM;
+
+// Global streaming infrastructure
+LPSTREAM g_lpStream = (LPSTREAM)1;
+LPWSTR g_lpwPrintBuffer = (LPWSTR)1;
 
 typedef long (*_fuuidtostring)(UUID *Uuid,RPC_CSTR *StringUuid);
 typedef long (*_RpcStringFreeA)(RPC_CSTR *String);
@@ -40,11 +49,21 @@ typedef ULONG LDAPAPI (*ldap_value_free_len_t)(struct berval **vals);
 typedef ULONG LDAPAPI (*ldap_value_free_t)(PCHAR *);
 typedef PCHAR LDAPAPI (*ldap_next_attribute_t)(LDAP *ld,LDAPMessage *entry,BerElement *ptr);
 typedef PLDAPSearch LDAPAPI (*ldap_search_init_pageA_t)(PLDAP ExternalHandle,const PCHAR DistinguishedName,ULONG ScopeOfSearch,const PCHAR SearchFilter,PCHAR AttributeList[],ULONG AttributesOnly,PLDAPControlA *ServerControls,PLDAPControlA *ClientControls,ULONG PageTimeLimit,ULONG TotalSizeLimit,PLDAPSortKeyA *SortKeys);
-WINBASEAPI void* WINAPI MSVCRT$malloc(SIZE_T);
+// Note: MSVCRT$calloc, MSVCRT$free, MSVCRT$memset, MSVCRT$vsnprintf already declared in bofdefs.h
+WINBASEAPI void* __cdecl MSVCRT$malloc(size_t);
+WINBASEAPI int __cdecl MSVCRT$_vsnwprintf_s(wchar_t*, size_t, size_t, const wchar_t*, va_list);
+WINBASEAPI size_t __cdecl MSVCRT$wcslen(const wchar_t*);
 WINBERAPI BerElement *BERAPI WLDAP32$ber_alloc_t(INT options);
 WINBERAPI INT BERAPI WLDAP32$ber_printf(BerElement *pBerElement, PSTR fmt, ...);
 WINBERAPI INT BERAPI WLDAP32$ber_flatten(BerElement *pBerElement, PBERVAL *pBerVal);
 WINLDAPAPI VOID LDAPAPI WLDAP32$ber_bvfree(PBERVAL bv);
+
+// OLE32 imports for streaming
+DECLSPEC_IMPORT HRESULT WINAPI OLE32$CreateStreamOnHGlobal(HGLOBAL, BOOL, LPSTREAM*);
+// Note: OLE32$CoTaskMemFree already declared in bofdefs.h
+
+// KERNEL32 imports
+DECLSPEC_IMPORT int WINAPI KERNEL32$MultiByteToWideChar(UINT, DWORD, LPCCH, int, LPWSTR, int);
 
 #define WLDAP32$ldap_init ((ldap_init_t)DynamicLoad("WLDAP32", "ldap_init"))
 #define WLDAP32$ldap_set_optionW ((ldap_set_optionW_t)DynamicLoad("WLDAP32", "ldap_set_optionW"))
@@ -141,6 +160,125 @@ int Base64encode(char* encoded, const char* string, int len) {
 	return p - encoded;
 }
 
+// Streaming output functions (based on ReconAD implementation)
+HRESULT BeaconPrintToStreamW(_In_z_ LPCWSTR lpwFormat, ...) {
+	HRESULT hr = S_FALSE;
+	va_list argList;
+	DWORD dwWritten = 0;
+
+	if (g_lpStream <= (LPSTREAM)1) {
+		hr = OLE32$CreateStreamOnHGlobal(NULL, TRUE, &g_lpStream);
+		if (FAILED(hr)) {
+			return hr;
+		}
+	}
+
+	// For BOF we need to avoid large stack buffers, so put print buffer on heap.
+	if (g_lpwPrintBuffer <= (LPWSTR)1) { // Allocate once and free in BeaconOutputStreamW.
+		g_lpwPrintBuffer = (LPWSTR)MSVCRT$calloc(MAX_STRING, sizeof(WCHAR));
+		if (g_lpwPrintBuffer == NULL) {
+			hr = E_FAIL;
+			goto CleanUp;
+		}
+	}
+
+	va_start(argList, lpwFormat);
+	if (!MSVCRT$_vsnwprintf_s(g_lpwPrintBuffer, MAX_STRING, MAX_STRING - 1, lpwFormat, argList)) {
+		hr = E_FAIL;
+		goto CleanUp;
+	}
+
+	if (g_lpStream != NULL) {
+		if (FAILED(hr = g_lpStream->lpVtbl->Write(g_lpStream, g_lpwPrintBuffer, (ULONG)MSVCRT$wcslen(g_lpwPrintBuffer) * sizeof(WCHAR), &dwWritten))) {
+			goto CleanUp;
+		}
+	}
+
+	hr = S_OK;
+
+CleanUp:
+
+	if (g_lpwPrintBuffer != NULL) {
+		MSVCRT$memset(g_lpwPrintBuffer, 0, MAX_STRING * sizeof(WCHAR)); // Clear print buffer.
+	}
+
+	va_end(argList);
+	return hr;
+}
+
+VOID BeaconOutputStreamW() {
+	STATSTG ssStreamData = { 0 };
+	SIZE_T cbSize = 0;
+	ULONG cbRead = 0;
+	LARGE_INTEGER pos;
+	LPWSTR lpwOutput = NULL;
+
+	if (g_lpStream <= (LPSTREAM)1)
+		return;
+
+	if (FAILED(g_lpStream->lpVtbl->Stat(g_lpStream, &ssStreamData, STATFLAG_NONAME))) {
+		return;
+	}
+
+	cbSize = ssStreamData.cbSize.LowPart;
+	lpwOutput = KERNEL32$HeapAlloc(KERNEL32$GetProcessHeap(), HEAP_ZERO_MEMORY, cbSize + 1);
+	if (lpwOutput != NULL) {
+		pos.QuadPart = 0;
+		if (FAILED(g_lpStream->lpVtbl->Seek(g_lpStream, pos, STREAM_SEEK_SET, NULL))) {
+			goto CleanUp;
+		}
+
+		if (FAILED(g_lpStream->lpVtbl->Read(g_lpStream, lpwOutput, (ULONG)cbSize, &cbRead))) {
+			goto CleanUp;
+		}
+
+		BeaconPrintf(CALLBACK_OUTPUT, "%ls", lpwOutput);
+	}
+
+CleanUp:
+
+	if (g_lpStream != NULL) {
+		g_lpStream->lpVtbl->Release(g_lpStream);
+		g_lpStream = NULL;
+	}
+
+	if (g_lpwPrintBuffer != NULL) {
+		MSVCRT$free(g_lpwPrintBuffer); // Free print buffer.
+		g_lpwPrintBuffer = NULL;
+	}
+
+	if (lpwOutput != NULL) {
+		KERNEL32$HeapFree(KERNEL32$GetProcessHeap(), 0, lpwOutput);
+	}
+
+	return;
+}
+
+// Wrapper to use streaming with char* format strings (converts to wchar_t*)
+HRESULT stream_printf(LPCSTR format, ...) {
+	char buffer[MAX_STRING];
+	WCHAR wbuffer[MAX_STRING];
+	va_list args;
+	int len;
+
+	// Format the string using char* format and varargs
+	va_start(args, format);
+	len = MSVCRT$vsnprintf(buffer, MAX_STRING - 1, format, args);
+	va_end(args);
+
+	if (len < 0 || len >= MAX_STRING - 1) {
+		return E_FAIL;
+	}
+
+	buffer[len] = '\0';
+
+	// Convert the formatted char* string to wchar_t*
+	KERNEL32$MultiByteToWideChar(CP_ACP, 0, buffer, -1, wbuffer, MAX_STRING);
+
+	// Print to stream
+	return BeaconPrintToStreamW(L"%s", wbuffer);
+}
+
 LDAP* InitialiseLDAPConnection(PCHAR hostName, PCHAR distinguishedName, BOOL ldaps){
 	LDAP* pLdapConnection = NULL;
     ULONG result;
@@ -182,13 +320,13 @@ LDAP* InitialiseLDAPConnection(PCHAR hostName, PCHAR distinguishedName, BOOL lda
         void* value = LDAP_OPT_ON;
         result = WLDAP32$ldap_set_optionW(pLdapConnection, LDAP_OPT_SIGN, &value);
         if (result != LDAP_SUCCESS) {
-            internal_printf("[!] Warning: Failed to enable LDAP signing: %lu\n", result);
+            stream_printf("[!] Warning: Failed to enable LDAP signing: %lu\n", result);
         }
 
         // Enable LDAP sealing (encryption) - this provides confidentiality
         result = WLDAP32$ldap_set_optionW(pLdapConnection, LDAP_OPT_ENCRYPT, &value);
         if (result != LDAP_SUCCESS) {
-            internal_printf("[!] Warning: Failed to enable LDAP sealing: %lu\n", result);
+            stream_printf("[!] Warning: Failed to enable LDAP sealing: %lu\n", result);
         }
     }
 
@@ -219,15 +357,15 @@ LDAP* InitialiseLDAPConnection(PCHAR hostName, PCHAR distinguishedName, BOOL lda
         pLdapConnection = NULL;
     }
     else {
-        internal_printf("[+] Successfully bound to LDAP server\n");
+        stream_printf("[+] Successfully bound to LDAP server\n");
     }
 
     return pLdapConnection;
 }
 
 PLDAPSearch ExecuteLDAPQuery(LDAP* pLdapConnection, PCHAR distinguishedName, char * ldap_filter, char * ldap_attributes, ULONG maxResults, ULONG scope_of_search){
-    internal_printf("[*] Filter: %s\n",ldap_filter);
-    internal_printf("[*] Scope of search value: %lu\n",scope_of_search);
+    stream_printf("[*] Filter: %s\n",ldap_filter);
+    stream_printf("[*] Scope of search value: %lu\n",scope_of_search);
 
 	// Security descriptor flags to read nTSecurityDescriptor as low-priv domain user
 	// value taken from https://github.com/fortalice/pyldapsearch/blob/main/pyldapsearch/__main__.py (Microsoft docs mentioned XORing all possible values to get this, but that didn't work)
@@ -240,8 +378,8 @@ PLDAPSearch ExecuteLDAPQuery(LDAP* pLdapConnection, PCHAR distinguishedName, cha
     PLDAPSearch pSearchResult = NULL;
     PCHAR attr[MAX_ATTRIBUTES] = {0};
 	if(ldap_attributes){
-        internal_printf("[*] Returning specific attribute(s): %s\n",ldap_attributes);
-        
+        stream_printf("[*] Returning specific attribute(s): %s\n",ldap_attributes);
+
         int attribute_count = 0;
         char *token = NULL;
         const char s[2] = ","; //delimiter
@@ -259,7 +397,7 @@ PLDAPSearch ExecuteLDAPQuery(LDAP* pLdapConnection, PCHAR distinguishedName, cha
                 attribute_count++;
                 token = MSVCRT$strtok(NULL, s);
             } else {
-                internal_printf("[!] Cannot return more than %i attributes, will omit additional attributes.\n", MAX_ATTRIBUTES);
+                stream_printf("[!] Cannot return more than %i attributes, will omit additional attributes.\n", MAX_ATTRIBUTES);
                 break;
             }
         }
@@ -317,7 +455,7 @@ PLDAPSearch ExecuteLDAPQuery(LDAP* pLdapConnection, PCHAR distinguishedName, cha
 
 void customAttributes(PCHAR pAttribute, PCHAR pValue)
 {
-    if(MSVCRT$strcmp(pAttribute, "objectGUID") == 0) 
+    if(MSVCRT$strcmp(pAttribute, "objectGUID") == 0)
     {
         if(fuuidtostring == (void *)1) // I'm doing this because we ran out of function slots for dynamic function resolution
         {
@@ -329,8 +467,8 @@ void customAttributes(PCHAR pAttribute, PCHAR pValue)
         PBERVAL tmp = (PBERVAL)pValue;
         //RPCRT4$UuidToStringA((UUID *) tmp->bv_val, &G);
         fuuidtostring((UUID *) tmp->bv_val, &G);
-        internal_printf("%s", G);
-        //RPCRT4$RpcStringFreeA(&G);       
+        stream_printf("%s", G);
+        //RPCRT4$RpcStringFreeA(&G);
         frpcstringfree(&G);
     } else if (MSVCRT$strcmp(pAttribute, "pKIExpirationPeriod") == 0 || MSVCRT$strcmp(pAttribute, "pKIOverlapPeriod") == 0 || MSVCRT$strcmp(pAttribute, "cACertificate") == 0 || MSVCRT$strcmp(pAttribute, "nTSecurityDescriptor") == 0 || MSVCRT$strcmp(pAttribute, "msDS-AllowedToActOnBehalfOfOtherIdentity") == 0 || MSVCRT$strcmp(pAttribute, "msDS-GenerationId") == 0 || MSVCRT$strcmp(pAttribute, "auditingPolicy") == 0 || MSVCRT$strcmp(pAttribute, "dSASignature") == 0 || MSVCRT$strcmp(pAttribute, "mS-DS-CreatorSID") == 0 || MSVCRT$strcmp(pAttribute, "logonHours") == 0 || MSVCRT$strcmp(pAttribute, "schemaIDGUID") == 0 || MSVCRT$strcmp(pAttribute, "mSMQDigests") == 0 || MSVCRT$strcmp(pAttribute, "mSMQSignCertificates") == 0 || MSVCRT$strcmp(pAttribute, "userCertificate") == 0 || MSVCRT$strcmp(pAttribute, "attributeSecurityGUID") == 0  ) {
 		char *encoded = NULL;
@@ -338,32 +476,32 @@ void customAttributes(PCHAR pAttribute, PCHAR pValue)
 		ULONG len = tmp->bv_len;
 		encoded = (char *)MSVCRT$malloc((size_t)len*2);
 		Base64encode(encoded, (char *)tmp->bv_val, len);
-		internal_printf("%s", encoded);
+		stream_printf("%s", encoded);
 		MSVCRT$free(encoded);
 	}
     else if(MSVCRT$strcmp(pAttribute, "objectSid") == 0 || MSVCRT$strcmp(pAttribute, "securityIdentifier") == 0)
     {
         LPSTR sid = NULL;
-		//internal_printf("len of objectSID: %d\n", MSVCRT$strlen(pValue));
+		//stream_printf("len of objectSID: %d\n", MSVCRT$strlen(pValue));
         PBERVAL tmp = (PBERVAL)pValue;
         ADVAPI32$ConvertSidToStringSidA((PSID)tmp->bv_val, &sid);
-        internal_printf("%s", sid);
+        stream_printf("%s", sid);
         KERNEL32$LocalFree(sid);
     }
     else
     {
-        internal_printf("%s", pValue);
+        stream_printf("%s", pValue);
     }
-    
+
 }
 
 void printAttribute(PCHAR pAttribute, PCHAR* ppValue){
-    internal_printf("\n%s: ", pAttribute);
+    stream_printf("\n%s: ", pAttribute);
     customAttributes(pAttribute, *ppValue);
     ppValue++;
     while(*ppValue != NULL)
     {
-        internal_printf(", ");
+        stream_printf(", ");
         customAttributes(pAttribute, *ppValue);
         ppValue++;
     }
@@ -392,13 +530,13 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
     ULONG stat = 0;
     ULONG totalResults = 0;
     HMODULE wldap = LoadLibrary("wldap32");
-    if(wldap == NULL) {internal_printf("Unable to load required library\n"); return;}
+    if(wldap == NULL) {stream_printf("Unable to load required library\n"); return;}
     _ldap_search_abondon_page searchDone = (_ldap_search_abondon_page)GetProcAddress(wldap, "ldap_search_abandon_page");
-    if(searchDone == NULL) {internal_printf("Unable to load required function"); return;}
+    if(searchDone == NULL) {stream_printf("Unable to load required function"); return;}
 
 	distinguishedName = (domain) ? domain : MSVCRT$strstr(szDN, "DC=");
 	if(distinguishedName != NULL && res) {
-    	internal_printf("[*] Distinguished name: %s\n", distinguishedName);	
+    	stream_printf("[*] Distinguished name: %s\n", distinguishedName);
 	}
 	else{
 		BeaconPrintf(CALLBACK_ERROR, "Failed to retrieve distinguished name.");
@@ -413,7 +551,7 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
     dwRet = NETAPI32$DsGetDcNameA(NULL, NULL, NULL, NULL, 0, &pdcInfo);
     if (ERROR_SUCCESS == dwRet || hostname) {
         if(!hostname){
-            internal_printf("[*] targeting DC: %s\n", pdcInfo->DomainControllerName);       
+            stream_printf("[*] targeting DC: %s\n", pdcInfo->DomainControllerName);
         }
     } else {
         BeaconPrintf(CALLBACK_ERROR, "Failed to identify PDC, are we domain joined?");
@@ -426,7 +564,7 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
     // Taken from https://docs.microsoft.com/en-us/previous-versions/windows/desktop/ldap/searching-a-directory
 	//////////////////////////////
     char * targetdc = (hostname == NULL) ? pdcInfo->DomainControllerName + 2: hostname;
-    internal_printf("[*] Binding to %s\n", targetdc);
+    stream_printf("[*] Binding to %s\n", targetdc);
     pLdapConnection = InitialiseLDAPConnection(targetdc, distinguishedName, ldaps);
 
     if(!pLdapConnection)
@@ -466,7 +604,7 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
 
         for( iCnt=0; iCnt < numberOfEntries; iCnt++ )
         {
-            internal_printf("\n--------------------");
+            stream_printf("\n--------------------");
 
             // Get the first/next entry.
             if( !iCnt )
@@ -528,6 +666,11 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
                 WLDAP32$ber_free(pBer,0);
                 pBer = NULL;
             }
+
+            // Flush stream every 50 results to avoid memory buildup
+            if (totalResults > 0 && totalResults % 50 == 0) {
+                BeaconOutputStreamW();
+            }
         }
         if(totalResults >= results_count && results_count != 0)
         {
@@ -536,8 +679,12 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
         WLDAP32$ldap_msgfree(pSearchResult); pSearchResult = NULL;
     }while(stat == LDAP_SUCCESS);
 
-    end: 
-    internal_printf("\nretrieved %lu results total\n", totalResults);
+    end:
+    stream_printf("\nretrieved %lu results total\n", totalResults);
+
+    // Final flush of any remaining data in the stream
+    BeaconOutputStreamW();
+
     if(pPageHandle)
     {
         searchDone(pLdapConnection, pPageHandle);
@@ -566,7 +713,7 @@ void ldapSearch(char * ldap_filter, char * ldap_attributes,	ULONG results_count,
     {
         WLDAP32$ldap_value_free(ppValue);
         ppValue = NULL;
-    }    
+    }
     if(wldap)
     {
         FreeLibrary(wldap);
@@ -609,9 +756,12 @@ VOID go(
 		return;
 	}
 
+	BeaconPrintf(CALLBACK_OUTPUT, "[DEBUG] Starting ldapSearch...\n");
 	ldapSearch(ldap_filter, ldap_attributes, results_count, scope_of_search, hostname, domain, ldaps==1);
+	BeaconPrintf(CALLBACK_OUTPUT, "[DEBUG] ldapSearch completed\n");
 
-	printoutput(TRUE);
+	// Note: We're using streaming output, so we don't call printoutput()
+	// The stream is flushed periodically and at the end of ldapSearch()
     if(fuuidtostring != (void *)1)
     {
         FreeLibrary(rpcrt);
