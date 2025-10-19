@@ -189,9 +189,43 @@ BOOL checkLDAP(wchar_t* dc, wchar_t* spn, BOOL ssl)
 		if(ssl == TRUE){
 			if (res == LDAP_INVALID_CREDENTIALS)
 			{
-				BeaconPrintf(CALLBACK_OUTPUT, "[-] LDAPS://%S REQUIRES channel binding (LDAP_INVALID_CREDENTIALS)\n", dc ? dc : L"target");
+				PWCHAR diagnosticMessage = NULL;
+				ULONG diagStatus = WLDAP32$ldap_get_optionW(pLdapConnection, LDAP_OPT_DIAGNOSTIC_MESSAGE, (void*)&diagnosticMessage);
+
+				if (diagStatus == LDAP_SUCCESS && diagnosticMessage != NULL)
+				{
+					if (MSVCRT$wcsstr(diagnosticMessage, L"80090346") != NULL)
+					{
+						BeaconPrintf(CALLBACK_OUTPUT, "[-] LDAPS://%S REQUIRES channel binding (diagnostic data 80090346)\n", dc ? dc : L"target");
+						BeaconPrintf(CALLBACK_OUTPUT, "    [!] LDAP diagnostic: %S\n", diagnosticMessage);
+						WLDAP32$ldap_memfree((PCHAR)diagnosticMessage);
+						WLDAP32$ldap_unbind_s(pLdapConnection);
+						return TRUE;
+					}
+
+					if (MSVCRT$wcsstr(diagnosticMessage, L"52e") != NULL ||
+						MSVCRT$wcsstr(diagnosticMessage, L"52E") != NULL ||
+						MSVCRT$wcsstr(diagnosticMessage, L"775") != NULL ||
+						MSVCRT$wcsstr(diagnosticMessage, L"533") != NULL ||
+						MSVCRT$wcsstr(diagnosticMessage, L"532") != NULL)
+					{
+						BeaconPrintf(CALLBACK_OUTPUT, "[+] LDAPS://%S does NOT require channel binding (diagnostic indicates credential issue)\n", dc ? dc : L"target");
+						BeaconPrintf(CALLBACK_OUTPUT, "    [!] LDAP diagnostic: %S\n", diagnosticMessage);
+						WLDAP32$ldap_memfree((PCHAR)diagnosticMessage);
+						WLDAP32$ldap_unbind_s(pLdapConnection);
+						return FALSE;
+					}
+
+					BeaconPrintf(CALLBACK_ERROR, "[-] LDAPS://%S returned unexpected diagnostic for LDAP_INVALID_CREDENTIALS: %S\n", dc ? dc : L"target", diagnosticMessage);
+					WLDAP32$ldap_memfree((PCHAR)diagnosticMessage);
+				}
+				else
+				{
+					BeaconPrintf(CALLBACK_ERROR, "[-] LDAPS://%S returned LDAP_INVALID_CREDENTIALS but diagnostic message could not be retrieved (error: %lu)\n", dc ? dc : L"target", diagStatus);
+				}
+
 				WLDAP32$ldap_unbind_s(pLdapConnection);
-				return TRUE;
+				return FALSE;
 			}
 			else if (res == LDAP_SUCCESS)
 			{
