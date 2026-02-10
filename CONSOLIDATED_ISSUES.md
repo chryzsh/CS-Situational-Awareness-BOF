@@ -17,6 +17,72 @@ Status key:
 
 ---
 
+## Triage: Open Issues by Priority
+
+### CRITICAL - Bugs and security issues
+
+| BOF | Description | Location |
+|-----|-------------|----------|
+| netstat | Pointer assignment bug in GetNameByPID() | entry.c:72-73, 77-78 |
+| netstat | Debug code `if (1 \|\|...)` makes condition always true | entry.c:166 |
+| netstat | Global static array - non-reentrant | entry.c:23-37 |
+| netlocalgroup2 | Memory leak - sidstr not freed with LocalFree | entry.c:23 |
+| ldapsearch | malloc without NULL checks (2 sites) | entry.c:99-100, 313 |
+| adv_audit_policies | Stack overflow from unbounded recursion | entry.c |
+| adv_audit_policies | Memory leaks in policy enumeration paths | entry.c |
+| dir | Modifies input buffer unsafely | entry.c |
+| dir | Unbounded recursion in directory traversal | entry.c |
+| ipconfig | Stack allocation exceeds 4KB | entry.c:11 |
+| nslookup | LoadLibraryA/GetProcAddress/FreeLibrary not dynamically resolved | entry.c:24, 34-35, 194 |
+| resources | Missing #ifdef BOF wrapper | entry.c:36 |
+| adcs_enum | Copy-paste error in CHECK_RETURN_FALSE message | adcs_enum.c:824 |
+| sc_enum | NULL dereference risks, array bounds, global vars | entry.c:342-349, 380, 8-14 |
+| sc_qc | Array bounds issues, global gServiceName | entry.c:11, 131-132 |
+| sc_qdescription | NULL checks missing (2 sites) | entry.c:28, 34 |
+| sc_qfailure | NULL checks missing, unsafe array access | entry.c:8, 35, 58 |
+| sc_qtriggerinfo | NULL checks missing, array bounds (3 sites) | entry.c:64, 86, 88 |
+| sc_query | Array bounds issues, NULL checks missing | entry.c:104, 141-142 |
+| schtasksenum | NULL checks missing, array bounds | entry.c:24, 26, 142 |
+| schtasksquery | NULL checks missing, array bounds | entry.c:24, 26, 102 |
+| tasklist | Array bounds checking issues | entry.c:68-73 |
+| vssenum | NULL checks missing, buffer overrun risk | entry.c:39, 68, 96 |
+| wmi_query | Array bounds checking issues | entry.c:58-71 |
+| listpipes | BOF implementation missing | N/A |
+
+### HIGH - Unsafe patterns and missing validation
+
+| BOF | Description | Location |
+|-----|-------------|----------|
+| netstat | TCP/UDP table iteration logic has bugs | entry.c |
+| ldapsearch | Memory leaks in error paths | entry.c |
+| ldapsearch | Inconsistent dynamic resolution (LoadLibraryA/GetProcAddress) | entry.c:298-300, 368-371 |
+| netsession2 | Inconsistent API resolution (LoadLibraryA/FreeLibrary direct) | entry.c:80-90, 261 |
+| adv_audit_policies | Recursion depth not limited | entry.c |
+| adv_audit_policies | Resource cleanup incomplete in error paths | entry.c |
+| adv_audit_policies | No input validation for iswow64 parameter | entry.c:323 |
+| dir | Recursion depth not limited | entry.c |
+| env | go() wrong signature - missing Buffer/Length params | entry.c:37 |
+| reg_query_recursive | Recursion depth not limited | entry.c |
+| netlocalgroup | Potential NULL pointer after free | entry.c:30 |
+| sc_enum | Unsafe array access in service enumeration | entry.c |
+| sc_qc | Buffer overflow potential in service config parsing | entry.c |
+| sc_qdescription | Service handle ops lack validation, NULL deref risk | entry.c |
+| sc_qfailure | Failure action array not validated, allocs unchecked | entry.c |
+| sc_qtriggerinfo | Trigger data array access unsafe, pointers not validated | entry.c |
+| sc_query | Enumeration buffer not validated, status buffer overflow | entry.c |
+| schtasksenum | Task folder enumeration lacks validation, COM ptrs unchecked | entry.c |
+| schtasksquery | Task query lacks validation, COM ptrs unchecked | entry.c |
+| tasklist | WMI result iteration could access beyond bounds | entry.c |
+| vssenum | VSS enumeration lacks validation, COM ops unsafe | entry.c |
+| wmi_query | WMI result parsing beyond bounds, COM variant unvalidated | entry.c |
+| NetApiBufferFree on NULL | enumLocalSessions, get_password_policy, netGroupList, netGroupListMembers, netLocalGroupList, netLocalGroupListMembers, netlocalgroup2, netloggedon, netloggedon2, netsession, netsession2, netshares, nettime, netuptime, netuser, netuse_list, netview | various |
+
+---
+
+## Detailed Findings by BOF
+
+---
+
 ## adcs_enum
 | # | Criticality | Description | Location | Status |
 |---|-------------|-------------|----------|--------|
