@@ -115,9 +115,12 @@ int WhoamiUser(void)
     internal_printf("\nUserName\t\tSID\n");
     internal_printf("====================== ====================================\n");
 
-    ADVAPI32$ConvertSidToStringSidA(pUserInfo->User.Sid, &pSidStr);
+    if(ADVAPI32$ConvertSidToStringSidA(pUserInfo->User.Sid, &pSidStr)) {
+        internal_printf("%s\t%s\n\n", pUserStr, pSidStr);
+        KERNEL32$LocalFree(pSidStr);
+        pSidStr = NULL;
+    };
 
-    internal_printf("%s\t%s\n\n", pUserStr, pSidStr);
 
 
     /* cleanup our allocations */
