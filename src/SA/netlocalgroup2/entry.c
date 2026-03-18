@@ -20,7 +20,10 @@ void ListServerGroupMembers(const wchar_t * server, const wchar_t * groupname)
 			{
 				// convert sid to string
 				wchar_t * sidstr = NULL;
-				ADVAPI32$ConvertSidToStringSidW(p->lgrmi2_sid, &sidstr);
+				if(!ADVAPI32$ConvertSidToStringSidW(p->lgrmi2_sid, &sidstr)){
+			        KERNEL32$LocalFree(sidstr);
+			        sidstr = NULL;
+				};
 
 				internal_printf("----------Local Group Member----------\n");
 				
